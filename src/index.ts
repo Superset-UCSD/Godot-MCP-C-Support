@@ -8,7 +8,7 @@
  */
 
 import { fileURLToPath } from 'url';
-import { join, dirname, basename, normalize } from 'path';
+import { join, dirname, basename, normalize, resolve, relative, isAbsolute } from 'path';
 import { existsSync, readdirSync, mkdirSync, readFileSync, statSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -251,6 +251,68 @@ class GodotServer {
       return scenePath;
     }
     return `res://${scenePath}`;
+  }
+
+  /**
+   * Check whether a child path stays within a parent path.
+   */
+  private isSubPath(parentPath: string, childPath: string): boolean {
+    const rel = relative(resolve(parentPath), resolve(childPath));
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  }
+
+  /**
+   * Ensure the snapshot root exists and return absolute path.
+   */
+  private ensureSnapshotRoot(projectPath: string): string {
+    const snapshotRoot = resolve(projectPath, '.mcp_snapshots');
+    mkdirSync(snapshotRoot, { recursive: true });
+    return snapshotRoot;
+  }
+
+  /**
+   * Resolve outputDir and restrict it to the project's .mcp_snapshots tree.
+   */
+  private resolveSnapshotOutputDir(projectPath: string, outputDir?: string): string {
+    const snapshotRoot = this.ensureSnapshotRoot(projectPath);
+    if (!outputDir || outputDir.trim() === '') {
+      return snapshotRoot;
+    }
+
+    if (outputDir.includes('..')) {
+      throw new Error('outputDir cannot contain ".."');
+    }
+
+    let candidate: string;
+    if (outputDir.startsWith('res://')) {
+      candidate = resolve(projectPath, outputDir.slice(6));
+    } else if (isAbsolute(outputDir)) {
+      candidate = resolve(outputDir);
+    } else {
+      candidate = resolve(projectPath, outputDir);
+    }
+
+    if (!this.isSubPath(snapshotRoot, candidate)) {
+      throw new Error('outputDir must be inside project .mcp_snapshots directory');
+    }
+
+    mkdirSync(candidate, { recursive: true });
+    return candidate;
+  }
+
+  /**
+   * Validate operation-returned snapshot file path.
+   */
+  private validateSnapshotResultPath(projectPath: string, filePath: string, fieldName: string): string {
+    const snapshotRoot = resolve(projectPath, '.mcp_snapshots');
+    const resolvedFile = resolve(filePath);
+    if (!this.isSubPath(resolve(projectPath), resolvedFile)) {
+      throw new Error(`${fieldName} is outside project directory`);
+    }
+    if (!this.isSubPath(snapshotRoot, resolvedFile)) {
+      throw new Error(`${fieldName} is outside .mcp_snapshots directory`);
+    }
+    return resolvedFile;
   }
 
   /**
@@ -2672,9 +2734,7 @@ class GodotServer {
         dumpLayout: args.dumpLayout ?? true,
       };
 
-      if (args.outputDir) {
-        params.outputDir = args.outputDir;
-      }
+      params.outputDir = this.resolveSnapshotOutputDir(args.projectPath, args.outputDir);
 
       const { stdout, stderr } = await this.executeOperation('render_scene_snapshot', params, args.projectPath);
       if (stderr && stderr.includes('[ERROR]')) {
@@ -2698,14 +2758,20 @@ class GodotServer {
       const returnBase64 = args.returnBase64 === true;
       const maxBase64Bytes = Number(args.maxBase64Bytes ?? 5_000_000);
       const warnings: string[] = Array.isArray(opResult.warnings) ? opResult.warnings : [];
+      const pngPath: string | null = opResult.pngPath
+        ? this.validateSnapshotResultPath(args.projectPath, opResult.pngPath, 'pngPath')
+        : null;
+      const jsonPath: string | null = opResult.jsonPath
+        ? this.validateSnapshotResultPath(args.projectPath, opResult.jsonPath, 'jsonPath')
+        : null;
 
       let pngBase64: string | null = null;
       let jsonText: string | null = null;
 
-      if (returnBase64 && opResult.pngPath && existsSync(opResult.pngPath)) {
-        const pngStats = statSync(opResult.pngPath);
+      if (returnBase64 && pngPath && existsSync(pngPath)) {
+        const pngStats = statSync(pngPath);
         if (pngStats.size <= maxBase64Bytes) {
-          pngBase64 = readFileSync(opResult.pngPath).toString('base64');
+          pngBase64 = readFileSync(pngPath).toString('base64');
         } else {
           warnings.push(
             `PNG is larger than maxBase64Bytes (${pngStats.size} > ${maxBase64Bytes}); returning file path only`
@@ -2713,10 +2779,10 @@ class GodotServer {
         }
       }
 
-      if (returnBase64 && opResult.jsonPath && existsSync(opResult.jsonPath)) {
-        const jsonStats = statSync(opResult.jsonPath);
+      if (returnBase64 && jsonPath && existsSync(jsonPath)) {
+        const jsonStats = statSync(jsonPath);
         if (jsonStats.size <= maxBase64Bytes) {
-          jsonText = readFileSync(opResult.jsonPath, 'utf8');
+          jsonText = readFileSync(jsonPath, 'utf8');
         } else {
           warnings.push(
             `Layout JSON is larger than maxBase64Bytes (${jsonStats.size} > ${maxBase64Bytes}); returning file path only`
@@ -2731,8 +2797,8 @@ class GodotServer {
             text: JSON.stringify(
               {
                 ok: true,
-                pngPath: opResult.pngPath || null,
-                jsonPath: opResult.jsonPath || null,
+                pngPath,
+                jsonPath,
                 width: opResult.width,
                 height: opResult.height,
                 overlayUsed: opResult.overlayUsed,
@@ -2797,9 +2863,7 @@ class GodotServer {
         waitFrames: args.waitFrames ?? 1,
       };
 
-      if (args.outputDir) {
-        params.outputDir = args.outputDir;
-      }
+      params.outputDir = this.resolveSnapshotOutputDir(args.projectPath, args.outputDir);
 
       const { stdout, stderr } = await this.executeOperation('dump_ui_layout', params, args.projectPath);
       if (stderr && stderr.includes('[ERROR]')) {
@@ -2824,9 +2888,12 @@ class GodotServer {
       const maxJsonChars = Number(args.maxJsonChars ?? 2_000_000);
       let jsonText: string | null = null;
       const warnings: string[] = [];
+      const jsonPath: string | null = opResult.jsonPath
+        ? this.validateSnapshotResultPath(args.projectPath, opResult.jsonPath, 'jsonPath')
+        : null;
 
-      if (returnJsonText && opResult.jsonPath && existsSync(opResult.jsonPath)) {
-        const rawText = readFileSync(opResult.jsonPath, 'utf8');
+      if (returnJsonText && jsonPath && existsSync(jsonPath)) {
+        const rawText = readFileSync(jsonPath, 'utf8');
         if (rawText.length <= maxJsonChars) {
           jsonText = rawText;
         } else {
@@ -2843,7 +2910,7 @@ class GodotServer {
             text: JSON.stringify(
               {
                 ok: true,
-                jsonPath: opResult.jsonPath || null,
+                jsonPath,
                 jsonText,
                 nodeCount: opResult.nodeCount,
                 warnings,
