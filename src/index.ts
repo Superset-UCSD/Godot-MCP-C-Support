@@ -3365,6 +3365,7 @@ class GodotServer {
 
         const timeoutHandle = setTimeout(() => {
           didTimeout = true;
+          stderr += `\nTimed out after ${timeoutSeconds}s`;
           proc.kill('SIGTERM');
           setTimeout(() => {
             if (!proc.killed) {
@@ -3382,6 +3383,9 @@ class GodotServer {
         proc.on('exit', (code) => {
           clearTimeout(timeoutHandle);
           exitCode = code;
+          if (didTimeout && exitCode === null) {
+            exitCode = -1;
+          }
           resolvePromise();
         });
         proc.on('error', (err) => {
