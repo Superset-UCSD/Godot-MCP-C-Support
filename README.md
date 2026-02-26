@@ -77,6 +77,9 @@ This direct feedback loop helps AI assistants like Claude understand what works 
   - Load sprites and textures into Sprite2D nodes
   - Export 3D scenes as MeshLibrary resources for GridMap
   - Save scenes with options for creating variants
+- **UI Inspection**:
+  - Render scene snapshots at arbitrary resolutions with optional Control overlays (`render_scene_snapshot`)
+  - Dump Control layout trees to JSON for numeric inspection and diffs (`dump_ui_layout`)
 - **C# Workflow**:
   - Default script language is C# (configurable with `GODOT_MCP_DEFAULT_SCRIPT_LANGUAGE` or `DEFAULT_SCRIPT_LANGUAGE`)
   - C# scripts can be instantiated by script path/global class via `Script.new()` in the bundled runner
@@ -219,6 +222,58 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 "Get the UID for a specific script file in my Godot 4.4 project"
 
 "Update UID references in my Godot project after upgrading to 4.4"
+```
+
+## UI Snapshot Workflow
+
+Use this loop when tuning UI spacing/alignment:
+
+1. Generate or modify your UI scene.
+2. Capture snapshots at multiple resolutions (for example: `1920x1080`, `2560x1440`, `1280x720`).
+3. Inspect screenshot output visually and inspect layout JSON numerically.
+4. Apply layout fixes and repeat.
+
+`render_scene_snapshot` writes output into `<project>/.mcp_snapshots` by default and can return inline base64/text payloads when requested.
+
+### Example: Render With Overlay + Layout Dump
+
+```json
+{
+  "projectPath": "/absolute/path/to/project",
+  "scenePath": "Scenes/MainMenu.tscn",
+  "width": 1920,
+  "height": 1080,
+  "waitFrames": 3,
+  "overlay": true,
+  "dumpLayout": true,
+  "returnBase64": false
+}
+```
+
+### Example: Layout Dump Only
+
+```json
+{
+  "projectPath": "/absolute/path/to/project",
+  "scenePath": "Scenes/MainMenu.tscn",
+  "width": 1280,
+  "height": 720,
+  "waitFrames": 1,
+  "returnJsonText": true
+}
+```
+
+### Example: Batch Resolutions (run repeatedly)
+
+```json
+{
+  "projectPath": "/absolute/path/to/project",
+  "scenePath": "Scenes/MainMenu.tscn",
+  "width": 2560,
+  "height": 1440,
+  "overlay": true,
+  "dumpLayout": true
+}
 ```
 
 ## Implementation Details
