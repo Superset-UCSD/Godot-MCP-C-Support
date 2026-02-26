@@ -3,8 +3,10 @@ extends SceneTree
 
 # Debug mode flag
 var debug_mode = false
+var pending_operation = ""
+var pending_params = {}
 
-func _init():
+func _initialize():
     var args = OS.get_cmdline_args()
     
     # Check for debug flag
@@ -32,10 +34,10 @@ func _init():
     log_debug("Operation index: " + str(operation_index))
     log_debug("Params index: " + str(params_index))
     
-    var operation = args[operation_index]
+    pending_operation = args[operation_index]
     var params_json = args[params_index]
     
-    log_info("Operation: " + operation)
+    log_info("Operation: " + pending_operation)
     log_debug("Params JSON: " + params_json)
     
     # Parse JSON using Godot 4.x API
@@ -53,11 +55,13 @@ func _init():
     if not params:
         log_error("Failed to parse JSON parameters: " + params_json)
         quit(1)
-    
-    log_info("Executing operation: " + operation)
-    
-    execute_operation(operation, params)
+    pending_params = params
 
+    log_info("Executing operation: " + pending_operation)
+    call_deferred("_run_pending_operation")
+
+func _run_pending_operation():
+    await execute_operation(pending_operation, pending_params)
     quit()
 
 # Logging functions
@@ -82,9 +86,9 @@ func execute_operation(operation, params):
         "attach_script":
             attach_script(params)
         "render_scene_snapshot":
-            render_scene_snapshot(params)
+            await render_scene_snapshot(params)
         "dump_ui_layout":
-            dump_ui_layout(params)
+            await dump_ui_layout(params)
         "load_sprite":
             load_sprite(params)
         "export_mesh_library":
@@ -98,6 +102,11 @@ func execute_operation(operation, params):
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
+
+func wait_for_frames(frame_count):
+    var count = max(frame_count, 1)
+    for i in range(count):
+        await process_frame
 
 # Get a script by name or path
 func get_script_by_name(name_of_class):
@@ -462,7 +471,9 @@ func render_scene_snapshot(params):
     if scene_root == null:
         printerr("Failed to instantiate scene: " + full_scene_path)
         quit(1)
-    clear_node_scripts(scene_root)
+    var strip_scripts = bool_param(params, "strip_scripts", false)
+    if strip_scripts:
+        clear_node_scripts(scene_root)
 
     var path_info = prepare_snapshot_paths(params, width, height)
     var viewport = setup_viewport_for_scene(scene_root, width, height)
@@ -491,8 +502,7 @@ func render_scene_snapshot(params):
             overlay_container.add_child(reference_rect)
             reference_rect.owner = scene_root
 
-    if wait_frames > 0:
-        OS.delay_msec(wait_frames * 16)
+    await wait_for_frames(wait_frames + 2)
 
     var image = viewport.get_texture().get_image()
     if image == null:
@@ -548,13 +558,14 @@ func dump_ui_layout(params):
     if scene_root == null:
         printerr("Failed to instantiate scene: " + full_scene_path)
         quit(1)
-    clear_node_scripts(scene_root)
+    var strip_scripts = bool_param(params, "strip_scripts", false)
+    if strip_scripts:
+        clear_node_scripts(scene_root)
 
     var path_info = prepare_snapshot_paths(params, width, height)
     var viewport = setup_viewport_for_scene(scene_root, width, height)
 
-    if wait_frames > 0:
-        OS.delay_msec(wait_frames * 16)
+    await wait_for_frames(wait_frames + 1)
 
     var layout_data = build_layout_result(scene_root, width, height)
     var write_error = write_json_file(path_info.json_path_abs, layout_data)
