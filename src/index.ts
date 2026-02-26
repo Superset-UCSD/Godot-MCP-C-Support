@@ -1266,6 +1266,28 @@ class GodotServer {
             required: ['projectPath', 'scenePath'],
           },
         },
+        {
+          name: 'build_solutions',
+          description: 'Build C# solutions/projects via Godot (--build-solutions)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              headless: {
+                type: 'boolean',
+                description: 'Run in headless mode (default true)',
+              },
+              quit: {
+                type: 'boolean',
+                description: 'Quit after build (default true)',
+              },
+            },
+            required: ['projectPath'],
+          },
+        },
       ],
     }));
 
@@ -1311,6 +1333,8 @@ class GodotServer {
           return await this.handleRenderSceneSnapshot(request.params.arguments);
         case 'dump_ui_layout':
           return await this.handleDumpUiLayout(request.params.arguments);
+        case 'build_solutions':
+          return await this.handleBuildSolutions(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -2964,6 +2988,97 @@ class GodotServer {
         [
           'Ensure Godot is installed correctly',
           'Verify the project and scene paths are accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the build_solutions tool
+   */
+  private async handleBuildSolutions(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        ['Provide a valid path to a Godot project directory']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath)) {
+      return this.createErrorResponse(
+        'Invalid project path',
+        ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      const godotPath = await this.resolveGodotPath(args.projectPath);
+      const headless = args.headless !== false;
+      const quit = args.quit !== false;
+
+      const cmdArgs: string[] = [];
+      if (headless) {
+        cmdArgs.push('--headless');
+      }
+      cmdArgs.push('--path', args.projectPath, '--build-solutions');
+      if (quit) {
+        cmdArgs.push('--quit');
+      }
+
+      let ok = true;
+      let exitCode = 0;
+      let stdout = '';
+      let stderr = '';
+
+      try {
+        const result = await execFileAsync(godotPath, cmdArgs);
+        stdout = result.stdout ?? '';
+        stderr = result.stderr ?? '';
+      } catch (error: any) {
+        ok = false;
+        exitCode = typeof error?.code === 'number' ? error.code : 1;
+        stdout = error?.stdout ?? '';
+        stderr = error?.stderr ?? (error?.message || 'Unknown error');
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok,
+                exitCode,
+                stdout,
+                stderr,
+                godotPathUsed: godotPath,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to build solutions: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Set GODOT_DOTNET_PATH to a Mono/.NET-enabled Godot binary',
+          'Verify the project path is accessible',
         ]
       );
     }
