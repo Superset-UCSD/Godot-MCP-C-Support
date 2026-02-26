@@ -352,6 +352,16 @@ class GodotServer {
   }
 
   /**
+   * Detect fatal Godot error content in stderr.
+   */
+  private hasFatalGodotError(stderr: string): boolean {
+    if (!stderr || !stderr.trim()) {
+      return false;
+    }
+    return /(script error|parse error|failed to load script|error:|\[error\])/i.test(stderr);
+  }
+
+  /**
    * Synchronous validation for constructor use
    * This is a quick check that only verifies file existence, not executable validity
    * Full validation will be performed later in detectGodotPath
@@ -776,11 +786,11 @@ class GodotServer {
     try {
       // Serialize the snake_case parameters to a valid JSON string
       const paramsJson = JSON.stringify(snakeCaseParams);
+      const useHeadless = operation !== 'render_scene_snapshot';
 
       // Build argument array for execFile to prevent command injection
       // Using execFile with argument arrays avoids shell interpretation entirely
       const args = [
-        '--headless',
         '--path',
         projectPath,  // Safe: passed as argument, not interpolated into shell command
         '--script',
@@ -788,6 +798,9 @@ class GodotServer {
         operation,
         paramsJson,  // Safe: passed as argument, not interpreted by shell
       ];
+      if (useHeadless) {
+        args.unshift('--headless');
+      }
 
       
       if (GODOT_DEBUG_MODE) {
@@ -3034,7 +3047,7 @@ class GodotServer {
       params.outputDir = this.resolveSnapshotOutputDir(args.projectPath, args.outputDir);
 
       const { stdout, stderr } = await this.executeOperation('render_scene_snapshot', params, args.projectPath);
-      if (stderr && stderr.includes('[ERROR]')) {
+      if (this.hasFatalGodotError(stderr)) {
         return this.createErrorResponse(
           `Failed to render snapshot: ${stderr}`,
           [
@@ -3047,7 +3060,7 @@ class GodotServer {
       const opResult = this.parseJsonFromOperationOutput(stdout);
       if (!opResult || !opResult.ok) {
         return this.createErrorResponse(
-          `Failed to parse snapshot result from operation output: ${stdout}`,
+          `Failed to parse snapshot result from operation output.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
           ['Enable DEBUG logs and inspect operation output']
         );
       }
@@ -3163,7 +3176,7 @@ class GodotServer {
       params.outputDir = this.resolveSnapshotOutputDir(args.projectPath, args.outputDir);
 
       const { stdout, stderr } = await this.executeOperation('dump_ui_layout', params, args.projectPath);
-      if (stderr && stderr.includes('[ERROR]')) {
+      if (this.hasFatalGodotError(stderr)) {
         return this.createErrorResponse(
           `Failed to dump UI layout: ${stderr}`,
           [
@@ -3176,7 +3189,7 @@ class GodotServer {
       const opResult = this.parseJsonFromOperationOutput(stdout);
       if (!opResult || !opResult.ok) {
         return this.createErrorResponse(
-          `Failed to parse layout dump result from operation output: ${stdout}`,
+          `Failed to parse layout dump result from operation output.\nstdout:\n${stdout}\nstderr:\n${stderr}`,
           ['Enable DEBUG logs and inspect operation output']
         );
       }

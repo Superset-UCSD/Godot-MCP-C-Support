@@ -56,7 +56,7 @@ func _init():
     
     log_info("Executing operation: " + operation)
     
-    await execute_operation(operation, params)
+    execute_operation(operation, params)
 
     quit()
 
@@ -82,9 +82,9 @@ func execute_operation(operation, params):
         "attach_script":
             attach_script(params)
         "render_scene_snapshot":
-            await render_scene_snapshot(params)
+            render_scene_snapshot(params)
         "dump_ui_layout":
-            await dump_ui_layout(params)
+            dump_ui_layout(params)
         "load_sprite":
             load_sprite(params)
         "export_mesh_library":
@@ -308,7 +308,9 @@ func collect_control_layout(control_root):
             var ctrl = current as Control
             var global_rect = ctrl.get_global_rect()
             var rel_path = str(control_root.get_path_to(ctrl))
-            var path_value = "root" if rel_path.is_empty() else "root/" + rel_path
+            var path_value = "root"
+            if not rel_path.is_empty():
+                path_value = "root/" + rel_path
             controls.append({
                 "path": path_value,
                 "name": ctrl.name,
@@ -352,19 +354,6 @@ func collect_control_layout(control_root):
 
     return controls
 
-class LayoutOverlay:
-    extends Control
-
-    var rects = []
-
-    func _draw():
-        for rect_data in rects:
-            var rect = Rect2(
-                Vector2(rect_data["x"], rect_data["y"]),
-                Vector2(rect_data["width"], rect_data["height"])
-            )
-            draw_rect(rect, Color(1.0, 0.2, 0.2, 1.0), false, 2.0)
-
 func build_layout_result(scene_root, width, height):
     var controls = collect_control_layout(scene_root)
     return {
@@ -379,9 +368,8 @@ func build_layout_result(scene_root, width, height):
 
 func setup_viewport_for_scene(scene_root, width, height):
     var viewport = SubViewport.new()
-    viewport.disable_3d = false
+    viewport.disable_3d = true
     viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-    viewport.usage = SubViewport.USAGE_2D
     viewport.size = Vector2i(width, height)
 
     get_root().add_child(viewport)
@@ -402,6 +390,13 @@ func setup_viewport_for_scene(scene_root, width, height):
         root_control.size = Vector2(width, height)
 
     return viewport
+
+func clear_node_scripts(node):
+    if node is Node:
+        if node.get_script() != null:
+            node.set_script(null)
+        for child in node.get_children():
+            clear_node_scripts(child)
 
 func normalize_scene_path_or_fail(params):
     if not params.has("scene_path"):
@@ -467,6 +462,7 @@ func render_scene_snapshot(params):
     if scene_root == null:
         printerr("Failed to instantiate scene: " + full_scene_path)
         quit(1)
+    clear_node_scripts(scene_root)
 
     var path_info = prepare_snapshot_paths(params, width, height)
     var viewport = setup_viewport_for_scene(scene_root, width, height)
@@ -474,22 +470,29 @@ func render_scene_snapshot(params):
     var warnings = []
 
     if overlay:
-        var overlay_node = LayoutOverlay.new()
-        overlay_node.name = "SnapshotOverlay"
-        overlay_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        overlay_node.set_anchors_preset(Control.PRESET_FULL_RECT)
-        overlay_node.offset_left = 0
-        overlay_node.offset_top = 0
-        overlay_node.offset_right = 0
-        overlay_node.offset_bottom = 0
-        overlay_node.rects = extract_overlay_rects(layout_data)
-        scene_root.add_child(overlay_node)
-        overlay_node.owner = scene_root
-        overlay_node.queue_redraw()
+        var overlay_container = Control.new()
+        overlay_container.name = "SnapshotOverlay"
+        overlay_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        overlay_container.set_anchors_preset(Control.PRESET_FULL_RECT)
+        overlay_container.offset_left = 0
+        overlay_container.offset_top = 0
+        overlay_container.offset_right = 0
+        overlay_container.offset_bottom = 0
+        scene_root.add_child(overlay_container)
+        overlay_container.owner = scene_root
 
-    for i in range(wait_frames):
-        await process_frame
-    await RenderingServer.frame_post_draw
+        for rect_data in extract_overlay_rects(layout_data):
+            var reference_rect = ReferenceRect.new()
+            reference_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+            reference_rect.position = Vector2(rect_data["x"], rect_data["y"])
+            reference_rect.size = Vector2(rect_data["width"], rect_data["height"])
+            reference_rect.border_color = Color(1.0, 0.2, 0.2, 1.0)
+            reference_rect.border_width = 2.0
+            overlay_container.add_child(reference_rect)
+            reference_rect.owner = scene_root
+
+    if wait_frames > 0:
+        OS.delay_msec(wait_frames * 16)
 
     var image = viewport.get_texture().get_image()
     if image == null:
@@ -545,13 +548,13 @@ func dump_ui_layout(params):
     if scene_root == null:
         printerr("Failed to instantiate scene: " + full_scene_path)
         quit(1)
+    clear_node_scripts(scene_root)
 
     var path_info = prepare_snapshot_paths(params, width, height)
     var viewport = setup_viewport_for_scene(scene_root, width, height)
 
-    for i in range(wait_frames):
-        await process_frame
-    await RenderingServer.frame_post_draw
+    if wait_frames > 0:
+        OS.delay_msec(wait_frames * 16)
 
     var layout_data = build_layout_result(scene_root, width, height)
     var write_error = write_json_file(path_info.json_path_abs, layout_data)
@@ -601,10 +604,10 @@ func create_script(params):
 
     var file_name = full_script_path.get_file()
     var inferred_class_name = file_name.get_basename()
-    var class_name = inferred_class_name
+    var script_name_token = inferred_class_name
     if params.has("class_name"):
-        class_name = str(params.class_name)
-    class_name = sanitize_identifier(class_name, "GeneratedScript")
+        script_name_token = str(params.class_name)
+    script_name_token = sanitize_identifier(script_name_token, "GeneratedScript")
 
     var base_type = "Node"
     if params.has("base_type"):
@@ -636,7 +639,7 @@ func create_script(params):
         script_contents += "namespace " + namespace_value + "\n"
         script_contents += "{\n"
         script_contents += attribute_lines
-        script_contents += "    public partial class " + class_name + " : " + base_type + "\n"
+        script_contents += "    public partial class " + script_name_token + " : " + base_type + "\n"
         script_contents += "    {\n"
         script_contents += "        public override void _Ready()\n"
         script_contents += "        {\n"
@@ -645,7 +648,7 @@ func create_script(params):
         script_contents += "}\n"
     elif language == "gdscript":
         script_contents = "extends " + base_type + "\n"
-        script_contents += "class_name " + class_name + "\n\n"
+        script_contents += "class_name " + script_name_token + "\n\n"
         if params.has("tool") and bool(params.tool):
             script_contents = "@tool\n" + script_contents
         script_contents += "func _ready() -> void:\n"
@@ -1303,7 +1306,9 @@ func export_mesh_library(params):
         print("Created new MeshLibrary")
     
     # Get mesh item names if provided
-    var mesh_item_names = params.mesh_item_names if params.has("mesh_item_names") else []
+    var mesh_item_names = []
+    if params.has("mesh_item_names"):
+        mesh_item_names = params.mesh_item_names
     var use_specific_items = mesh_item_names.size() > 0
     
     if debug_mode:
@@ -1687,7 +1692,9 @@ func save_scene(params):
         print("Scene instantiated")
     
     # Determine save path
-    var save_path = params.new_path if params.has("new_path") else full_scene_path
+    var save_path = full_scene_path
+    if params.has("new_path"):
+        save_path = params.new_path
     if params.has("new_path") and not save_path.begins_with("res://"):
         save_path = "res://" + save_path
     
