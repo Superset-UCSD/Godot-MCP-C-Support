@@ -56,6 +56,22 @@ func _init():
     
     log_info("Executing operation: " + operation)
     
+    await execute_operation(operation, params)
+
+    quit()
+
+# Logging functions
+func log_debug(message):
+    if debug_mode:
+        print("[DEBUG] " + message)
+
+func log_info(message):
+    print("[INFO] " + message)
+
+func log_error(message):
+    printerr("[ERROR] " + message)
+
+func execute_operation(operation, params):
     match operation:
         "create_scene":
             create_scene(params)
@@ -65,6 +81,10 @@ func _init():
             create_script(params)
         "attach_script":
             attach_script(params)
+        "render_scene_snapshot":
+            await render_scene_snapshot(params)
+        "dump_ui_layout":
+            await dump_ui_layout(params)
         "load_sprite":
             load_sprite(params)
         "export_mesh_library":
@@ -78,19 +98,6 @@ func _init():
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
-    
-    quit()
-
-# Logging functions
-func log_debug(message):
-    if debug_mode:
-        print("[DEBUG] " + message)
-
-func log_info(message):
-    print("[INFO] " + message)
-
-func log_error(message):
-    printerr("[ERROR] " + message)
 
 # Get a script by name or path
 func get_script_by_name(name_of_class):
@@ -188,6 +195,15 @@ func normalize_res_path(path_value):
         return normalized_path
     return "res://" + normalized_path
 
+func join_paths(base_path, file_name):
+    var separator = "/"
+    if base_path.find("\\") != -1:
+        separator = "\\"
+
+    if base_path.ends_with("/") or base_path.ends_with("\\"):
+        return base_path + file_name
+    return base_path + separator + file_name
+
 func ensure_res_directory_exists(res_file_path):
     var res_dir = res_file_path.get_base_dir()
     if res_dir == "res://" or res_dir.is_empty():
@@ -242,6 +258,316 @@ func sanitize_namespace(raw_value, fallback):
         return sanitize_identifier(fallback, "GodotMcp")
 
     return ".".join(sanitized_chunks)
+
+func get_snapshot_root_absolute():
+    return join_paths(ProjectSettings.globalize_path("res://"), ".mcp_snapshots")
+
+func get_snapshot_output_dir(params):
+    var output_dir = ""
+    if params.has("output_dir"):
+        output_dir = str(params.output_dir).strip_edges()
+    if output_dir.is_empty():
+        output_dir = get_snapshot_root_absolute()
+    return output_dir
+
+func ensure_absolute_directory_exists(absolute_dir):
+    if absolute_dir.is_empty():
+        return ERR_INVALID_PARAMETER
+    if DirAccess.dir_exists_absolute(absolute_dir):
+        return OK
+    return DirAccess.make_dir_recursive_absolute(absolute_dir)
+
+func timestamp_slug():
+    var dt = Time.get_datetime_dict_from_system()
+    return "%04d%02d%02d-%02d%02d%02d" % [
+        int(dt.year), int(dt.month), int(dt.day),
+        int(dt.hour), int(dt.minute), int(dt.second)
+    ]
+
+func scene_slug(scene_path):
+    var normalized = normalize_res_path(scene_path)
+    var file_name = normalized.get_file().get_basename()
+    return sanitize_identifier(file_name, "scene")
+
+func bool_param(params, key, default_value):
+    if params.has(key):
+        return bool(params[key])
+    return default_value
+
+func int_param(params, key, default_value):
+    if params.has(key):
+        return int(params[key])
+    return default_value
+
+func collect_control_layout(control_root):
+    var controls = []
+    var pending = [control_root]
+    while pending.size() > 0:
+        var current = pending.pop_back()
+        if current is Control:
+            var ctrl = current as Control
+            var global_rect = ctrl.get_global_rect()
+            var rel_path = str(control_root.get_path_to(ctrl))
+            var path_value = "root" if rel_path.is_empty() else "root/" + rel_path
+            controls.append({
+                "path": path_value,
+                "name": ctrl.name,
+                "class": ctrl.get_class(),
+                "global_rect": {
+                    "x": global_rect.position.x,
+                    "y": global_rect.position.y,
+                    "width": global_rect.size.x,
+                    "height": global_rect.size.y
+                },
+                "anchors": {
+                    "left": ctrl.anchor_left,
+                    "top": ctrl.anchor_top,
+                    "right": ctrl.anchor_right,
+                    "bottom": ctrl.anchor_bottom
+                },
+                "offsets": {
+                    "left": ctrl.offset_left,
+                    "top": ctrl.offset_top,
+                    "right": ctrl.offset_right,
+                    "bottom": ctrl.offset_bottom
+                },
+                "size_flags_horizontal": ctrl.size_flags_horizontal,
+                "size_flags_vertical": ctrl.size_flags_vertical,
+                "custom_minimum_size": {
+                    "x": ctrl.custom_minimum_size.x,
+                    "y": ctrl.custom_minimum_size.y
+                },
+                "visible": ctrl.visible,
+                "modulate": {
+                    "r": ctrl.modulate.r,
+                    "g": ctrl.modulate.g,
+                    "b": ctrl.modulate.b,
+                    "a": ctrl.modulate.a
+                }
+            })
+
+        for child in current.get_children():
+            if child is Node:
+                pending.append(child)
+
+    return controls
+
+class LayoutOverlay:
+    extends Control
+
+    var rects = []
+
+    func _draw():
+        for rect_data in rects:
+            var rect = Rect2(
+                Vector2(rect_data["x"], rect_data["y"]),
+                Vector2(rect_data["width"], rect_data["height"])
+            )
+            draw_rect(rect, Color(1.0, 0.2, 0.2, 1.0), false, 2.0)
+
+func build_layout_result(scene_root, width, height):
+    var controls = collect_control_layout(scene_root)
+    return {
+        "timestamp": timestamp_slug(),
+        "viewport": {
+            "width": width,
+            "height": height
+        },
+        "node_count": controls.size(),
+        "controls": controls
+    }
+
+func setup_viewport_for_scene(scene_root, width, height):
+    var viewport = SubViewport.new()
+    viewport.disable_3d = false
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    viewport.usage = SubViewport.USAGE_2D
+    viewport.size = Vector2i(width, height)
+
+    get_root().add_child(viewport)
+
+    var host = Node2D.new()
+    host.name = "SnapshotHost"
+    viewport.add_child(host)
+    host.add_child(scene_root)
+
+    if scene_root is Control:
+        var root_control = scene_root as Control
+        root_control.visible = true
+        root_control.set_anchors_preset(Control.PRESET_FULL_RECT)
+        root_control.offset_left = 0
+        root_control.offset_top = 0
+        root_control.offset_right = 0
+        root_control.offset_bottom = 0
+        root_control.size = Vector2(width, height)
+
+    return viewport
+
+func normalize_scene_path_or_fail(params):
+    if not params.has("scene_path"):
+        printerr("scene_path is required")
+        quit(1)
+    var full_scene_path = normalize_res_path(params.scene_path)
+    if not FileAccess.file_exists(full_scene_path):
+        printerr("Scene file does not exist: " + full_scene_path)
+        quit(1)
+    return full_scene_path
+
+func prepare_snapshot_paths(params, width, height):
+    var output_dir_abs = get_snapshot_output_dir(params)
+    var ensure_error = ensure_absolute_directory_exists(output_dir_abs)
+    if ensure_error != OK:
+        printerr("Failed to create snapshot directory: " + output_dir_abs)
+        printerr("Error code: " + str(ensure_error))
+        quit(1)
+
+    var slug = scene_slug(params.scene_path)
+    var stamp = timestamp_slug()
+    var base_name = "%s_%dx%d_%s" % [slug, width, height, stamp]
+    return {
+        "output_dir_abs": output_dir_abs,
+        "png_path_abs": join_paths(output_dir_abs, base_name + ".png"),
+        "json_path_abs": join_paths(output_dir_abs, base_name + ".layout.json")
+    }
+
+func write_json_file(absolute_path, data):
+    var file = FileAccess.open(absolute_path, FileAccess.WRITE)
+    if file == null:
+        return FileAccess.get_open_error()
+    file.store_string(JSON.stringify(data, "  "))
+    file.close()
+    return OK
+
+func extract_overlay_rects(layout_data):
+    var overlay_rects = []
+    for control_data in layout_data.controls:
+        overlay_rects.append(control_data.global_rect)
+    return overlay_rects
+
+func render_scene_snapshot(params):
+    var width = int_param(params, "width", 1920)
+    var height = int_param(params, "height", 1080)
+    var wait_frames = int_param(params, "wait_frames", 3)
+    var overlay = bool_param(params, "overlay", true)
+    var dump_layout = bool_param(params, "dump_layout", true)
+
+    if width <= 0 or height <= 0:
+        printerr("width and height must be positive")
+        quit(1)
+    if wait_frames < 0:
+        wait_frames = 0
+
+    var full_scene_path = normalize_scene_path_or_fail(params)
+    var packed_scene = load(full_scene_path) as PackedScene
+    if packed_scene == null:
+        printerr("Failed to load scene as PackedScene: " + full_scene_path)
+        quit(1)
+
+    var scene_root = packed_scene.instantiate()
+    if scene_root == null:
+        printerr("Failed to instantiate scene: " + full_scene_path)
+        quit(1)
+
+    var path_info = prepare_snapshot_paths(params, width, height)
+    var viewport = setup_viewport_for_scene(scene_root, width, height)
+    var layout_data = build_layout_result(scene_root, width, height)
+    var warnings = []
+
+    if overlay:
+        var overlay_node = LayoutOverlay.new()
+        overlay_node.name = "SnapshotOverlay"
+        overlay_node.mouse_filter = Control.MOUSE_FILTER_IGNORE
+        overlay_node.set_anchors_preset(Control.PRESET_FULL_RECT)
+        overlay_node.offset_left = 0
+        overlay_node.offset_top = 0
+        overlay_node.offset_right = 0
+        overlay_node.offset_bottom = 0
+        overlay_node.rects = extract_overlay_rects(layout_data)
+        scene_root.add_child(overlay_node)
+        overlay_node.owner = scene_root
+        overlay_node.queue_redraw()
+
+    for i in range(wait_frames):
+        await process_frame
+    await RenderingServer.frame_post_draw
+
+    var image = viewport.get_texture().get_image()
+    if image == null:
+        printerr("Failed to capture viewport image")
+        quit(1)
+
+    var png_error = image.save_png(path_info.png_path_abs)
+    if png_error != OK:
+        printerr("Failed to save PNG: " + path_info.png_path_abs)
+        printerr("Error code: " + str(png_error))
+        quit(1)
+
+    var json_path_abs = null
+    if dump_layout:
+        json_path_abs = path_info.json_path_abs
+        var write_error = write_json_file(json_path_abs, layout_data)
+        if write_error != OK:
+            warnings.append("Failed to write layout JSON. Error code: " + str(write_error))
+            json_path_abs = null
+
+    var result = {
+        "ok": true,
+        "pngPath": path_info.png_path_abs,
+        "jsonPath": json_path_abs,
+        "width": width,
+        "height": height,
+        "overlayUsed": overlay,
+        "nodeCount": int(layout_data.node_count),
+        "warnings": warnings
+    }
+
+    print(JSON.stringify(result))
+
+    viewport.queue_free()
+
+func dump_ui_layout(params):
+    var width = int_param(params, "width", 1920)
+    var height = int_param(params, "height", 1080)
+    var wait_frames = int_param(params, "wait_frames", 1)
+    if width <= 0 or height <= 0:
+        printerr("width and height must be positive")
+        quit(1)
+    if wait_frames < 0:
+        wait_frames = 0
+
+    var full_scene_path = normalize_scene_path_or_fail(params)
+    var packed_scene = load(full_scene_path) as PackedScene
+    if packed_scene == null:
+        printerr("Failed to load scene as PackedScene: " + full_scene_path)
+        quit(1)
+
+    var scene_root = packed_scene.instantiate()
+    if scene_root == null:
+        printerr("Failed to instantiate scene: " + full_scene_path)
+        quit(1)
+
+    var path_info = prepare_snapshot_paths(params, width, height)
+    var viewport = setup_viewport_for_scene(scene_root, width, height)
+
+    for i in range(wait_frames):
+        await process_frame
+    await RenderingServer.frame_post_draw
+
+    var layout_data = build_layout_result(scene_root, width, height)
+    var write_error = write_json_file(path_info.json_path_abs, layout_data)
+    if write_error != OK:
+        printerr("Failed to write layout JSON: " + path_info.json_path_abs)
+        printerr("Error code: " + str(write_error))
+        quit(1)
+
+    var result = {
+        "ok": true,
+        "jsonPath": path_info.json_path_abs,
+        "nodeCount": int(layout_data.node_count)
+    }
+    print(JSON.stringify(result))
+
+    viewport.queue_free()
 
 func create_script(params):
     if not params.has("script_path"):
