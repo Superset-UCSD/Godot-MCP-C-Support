@@ -3406,6 +3406,10 @@ class GodotServer {
         slnFiles,
         csprojFiles,
       };
+      if (!foundSlnCsprojAfter.found) {
+        stderr += '\nNo .sln or .csproj found in project root after --build-solutions.';
+      }
+      const ok = !didTimeout && exitCode === 0 && foundSlnCsprojAfter.found;
 
       return {
         content: [
@@ -3413,7 +3417,7 @@ class GodotServer {
             type: 'text',
             text: JSON.stringify(
               {
-                ok: !didTimeout && exitCode === 0,
+                ok,
                 exitCode,
                 stdout,
                 stderr,
