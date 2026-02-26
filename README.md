@@ -95,6 +95,15 @@ This direct feedback loop helps AI assistants like Claude understand what works 
 - An AI assistant that supports MCP (Cline, Cursor, etc.)
 - For C# scripting: a Mono/.NET-enabled Godot build and .NET SDK installed
 
+### macOS Godot binaries (standard vs .NET/Mono)
+
+On macOS, Godot app bundles contain the executable at:
+
+- Standard Godot: `/Applications/Godot.app/Contents/MacOS/Godot`
+- .NET/Mono Godot: `/Applications/Godot_mono.app/Contents/MacOS/Godot`
+
+For C# projects, set `GODOT_DOTNET_PATH` to the Mono/.NET binary path above so `.cs` resources and solution generation/builds work reliably.
+
 ## Installation and Configuration
 
 ### Step 1: Install and Build
@@ -184,9 +193,12 @@ Create a file at `.cursor/mcp.json` in your project directory with the following
 You can customize the server behavior with these environment variables:
 
 - `GODOT_PATH`: Path to the Godot executable (overrides automatic detection)
+- `GODOT_DOTNET_PATH`: Preferred Godot executable for C# projects (used when `.cs` files are detected and `GODOT_PATH` is not set)
 - `DEBUG`: Set to "true" to enable detailed server-side debug logging
 - `GODOT_MCP_DEFAULT_SCRIPT_LANGUAGE`: Default for `create_script` when language is omitted (`csharp` or `gdscript`, defaults to `csharp`)
 - `DEFAULT_SCRIPT_LANGUAGE`: Legacy-compatible fallback for default script language
+
+`GODOT_PATH` always takes precedence when set. Otherwise, godot-mcp auto-selects a dotnet-capable Godot for C# projects.
 
 ## Example Prompts
 
@@ -214,6 +226,8 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 "Attach Scripts/MainMenuController.cs to root/MainMenu in Scenes/MainMenu.tscn"
 
 "Build my project's C# solution"
+
+"Run build_solutions on my project to generate/build C# solution files"
 
 "Export my 3D models as a MeshLibrary for use with GridMap"
 
@@ -296,6 +310,10 @@ This architecture provides several benefits:
 - **Reduced Overhead**: Minimizes file I/O operations for better performance
 
 The bundled script accepts operation type and parameters as JSON, allowing for flexible and dynamic operation execution without generating temporary files for each operation.
+
+### C# workflow note
+
+If C# files fail to load (for example, "No loader found for resource: ... .cs") or `*.sln`/`*.csproj` files are missing, run the `build_solutions` tool once for that project. This triggers Godot's solution build pipeline and usually restores C# project artifacts.
 
 ## Troubleshooting
 
