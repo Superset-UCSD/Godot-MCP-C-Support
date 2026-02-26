@@ -552,9 +552,14 @@ class GodotServer {
     }
 
     const isDotnet = this.isDotnetProject(projectPath);
+    const preferDotnetByDefault = !projectPath && (
+      !!process.env.GODOT_DOTNET_PATH ||
+      process.platform === 'darwin'
+    );
+    const preferDotnet = isDotnet || preferDotnetByDefault;
     const candidatePaths: string[] = [];
 
-    if (isDotnet) {
+    if (preferDotnet) {
       if (process.env.GODOT_DOTNET_PATH) {
         candidatePaths.push(normalize(process.env.GODOT_DOTNET_PATH));
       }
