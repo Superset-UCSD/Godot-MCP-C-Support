@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize } from 'path';
-import { existsSync, readdirSync, mkdirSync } from 'fs';
+import { existsSync, readdirSync, mkdirSync, readFileSync, statSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -241,6 +241,43 @@ class GodotServer {
       return pathValue.slice(6);
     }
     return pathValue;
+  }
+
+  /**
+   * Ensure a scene path is a res:// path.
+   */
+  private normalizeScenePath(scenePath: string): string {
+    if (scenePath.startsWith('res://')) {
+      return scenePath;
+    }
+    return `res://${scenePath}`;
+  }
+
+  /**
+   * Extract the last JSON object/array printed to stdout by the operations runner.
+   */
+  private parseJsonFromOperationOutput(stdout: string): any | null {
+    const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      const candidates: string[] = [line];
+      const firstBrace = line.indexOf('{');
+      if (firstBrace !== -1) {
+        candidates.push(line.slice(firstBrace));
+      }
+      const firstBracket = line.indexOf('[');
+      if (firstBracket !== -1) {
+        candidates.push(line.slice(firstBracket));
+      }
+      for (const candidate of candidates) {
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          // Continue trying older lines/candidates.
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -1032,6 +1069,44 @@ class GodotServer {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'render_scene_snapshot',
+          description: 'Render a scene to PNG and optionally dump Control layout JSON',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+              scenePath: { type: 'string', description: 'Scene path (res://... or project-relative)' },
+              width: { type: 'integer', description: 'Output image width (default 1920)' },
+              height: { type: 'integer', description: 'Output image height (default 1080)' },
+              waitFrames: { type: 'integer', description: 'Frames to process before capture (default 3)' },
+              overlay: { type: 'boolean', description: 'Draw Control layout overlay (default true)' },
+              dumpLayout: { type: 'boolean', description: 'Write layout JSON dump (default true)' },
+              outputDir: { type: 'string', description: 'Optional output directory (default .mcp_snapshots under project)' },
+              returnBase64: { type: 'boolean', description: 'If true, include base64 PNG and JSON text when possible' },
+              maxBase64Bytes: { type: 'integer', description: 'Base64 payload size cap in bytes (default 5000000)' },
+            },
+            required: ['projectPath', 'scenePath'],
+          },
+        },
+        {
+          name: 'dump_ui_layout',
+          description: 'Dump Control layout JSON for a scene without screenshot rendering',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+              scenePath: { type: 'string', description: 'Scene path (res://... or project-relative)' },
+              width: { type: 'integer', description: 'Virtual viewport width for layout (default 1920)' },
+              height: { type: 'integer', description: 'Virtual viewport height for layout (default 1080)' },
+              waitFrames: { type: 'integer', description: 'Frames to process before dump (default 1)' },
+              outputDir: { type: 'string', description: 'Optional output directory (default .mcp_snapshots under project)' },
+              returnJsonText: { type: 'boolean', description: 'If true, include JSON content in response (default true)' },
+              maxJsonChars: { type: 'integer', description: 'Max chars for inline jsonText (default 2000000)' },
+            },
+            required: ['projectPath', 'scenePath'],
+          },
+        },
       ],
     }));
 
@@ -1073,6 +1148,10 @@ class GodotServer {
           return await this.handleUpdateProjectUids(request.params.arguments);
         case 'dotnet_build':
           return await this.handleDotnetBuild(request.params.arguments);
+        case 'render_scene_snapshot':
+          return await this.handleRenderSceneSnapshot(request.params.arguments);
+        case 'dump_ui_layout':
+          return await this.handleDumpUiLayout(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -2547,6 +2626,240 @@ class GodotServer {
         [
           'Ensure dotnet SDK is installed and available in PATH',
           'Verify solution/project files are present and valid',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the render_scene_snapshot tool
+   */
+  private async handleRenderSceneSnapshot(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.projectPath || !args.scenePath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath and scenePath']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      const params: any = {
+        scenePath: this.normalizeScenePath(args.scenePath),
+        width: args.width ?? 1920,
+        height: args.height ?? 1080,
+        waitFrames: args.waitFrames ?? 3,
+        overlay: args.overlay ?? true,
+        dumpLayout: args.dumpLayout ?? true,
+      };
+
+      if (args.outputDir) {
+        params.outputDir = args.outputDir;
+      }
+
+      const { stdout, stderr } = await this.executeOperation('render_scene_snapshot', params, args.projectPath);
+      if (stderr && stderr.includes('[ERROR]')) {
+        return this.createErrorResponse(
+          `Failed to render snapshot: ${stderr}`,
+          [
+            'Verify the scene path exists and is valid',
+            'Check that output directory is writable',
+          ]
+        );
+      }
+
+      const opResult = this.parseJsonFromOperationOutput(stdout);
+      if (!opResult || !opResult.ok) {
+        return this.createErrorResponse(
+          `Failed to parse snapshot result from operation output: ${stdout}`,
+          ['Enable DEBUG logs and inspect operation output']
+        );
+      }
+
+      const returnBase64 = args.returnBase64 === true;
+      const maxBase64Bytes = Number(args.maxBase64Bytes ?? 5_000_000);
+      const warnings: string[] = Array.isArray(opResult.warnings) ? opResult.warnings : [];
+
+      let pngBase64: string | null = null;
+      let jsonText: string | null = null;
+
+      if (returnBase64 && opResult.pngPath && existsSync(opResult.pngPath)) {
+        const pngStats = statSync(opResult.pngPath);
+        if (pngStats.size <= maxBase64Bytes) {
+          pngBase64 = readFileSync(opResult.pngPath).toString('base64');
+        } else {
+          warnings.push(
+            `PNG is larger than maxBase64Bytes (${pngStats.size} > ${maxBase64Bytes}); returning file path only`
+          );
+        }
+      }
+
+      if (returnBase64 && opResult.jsonPath && existsSync(opResult.jsonPath)) {
+        const jsonStats = statSync(opResult.jsonPath);
+        if (jsonStats.size <= maxBase64Bytes) {
+          jsonText = readFileSync(opResult.jsonPath, 'utf8');
+        } else {
+          warnings.push(
+            `Layout JSON is larger than maxBase64Bytes (${jsonStats.size} > ${maxBase64Bytes}); returning file path only`
+          );
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: true,
+                pngPath: opResult.pngPath || null,
+                jsonPath: opResult.jsonPath || null,
+                width: opResult.width,
+                height: opResult.height,
+                overlayUsed: opResult.overlayUsed,
+                nodeCount: opResult.nodeCount,
+                pngBase64,
+                jsonText,
+                warnings,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to render scene snapshot: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Verify the project and scene paths are accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the dump_ui_layout tool
+   */
+  private async handleDumpUiLayout(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.projectPath || !args.scenePath) {
+      return this.createErrorResponse(
+        'Missing required parameters',
+        ['Provide projectPath and scenePath']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+      return this.createErrorResponse(
+        'Invalid path',
+        ['Provide valid paths without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      const params: any = {
+        scenePath: this.normalizeScenePath(args.scenePath),
+        width: args.width ?? 1920,
+        height: args.height ?? 1080,
+        waitFrames: args.waitFrames ?? 1,
+      };
+
+      if (args.outputDir) {
+        params.outputDir = args.outputDir;
+      }
+
+      const { stdout, stderr } = await this.executeOperation('dump_ui_layout', params, args.projectPath);
+      if (stderr && stderr.includes('[ERROR]')) {
+        return this.createErrorResponse(
+          `Failed to dump UI layout: ${stderr}`,
+          [
+            'Verify the scene path exists and is valid',
+            'Check that output directory is writable',
+          ]
+        );
+      }
+
+      const opResult = this.parseJsonFromOperationOutput(stdout);
+      if (!opResult || !opResult.ok) {
+        return this.createErrorResponse(
+          `Failed to parse layout dump result from operation output: ${stdout}`,
+          ['Enable DEBUG logs and inspect operation output']
+        );
+      }
+
+      const returnJsonText = args.returnJsonText !== false;
+      const maxJsonChars = Number(args.maxJsonChars ?? 2_000_000);
+      let jsonText: string | null = null;
+      const warnings: string[] = [];
+
+      if (returnJsonText && opResult.jsonPath && existsSync(opResult.jsonPath)) {
+        const rawText = readFileSync(opResult.jsonPath, 'utf8');
+        if (rawText.length <= maxJsonChars) {
+          jsonText = rawText;
+        } else {
+          warnings.push(
+            `Layout JSON is larger than maxJsonChars (${rawText.length} > ${maxJsonChars}); returning file path only`
+          );
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: true,
+                jsonPath: opResult.jsonPath || null,
+                jsonText,
+                nodeCount: opResult.nodeCount,
+                warnings,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to dump UI layout: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Verify the project and scene paths are accessible',
         ]
       );
     }
