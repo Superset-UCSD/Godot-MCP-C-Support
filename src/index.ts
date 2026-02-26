@@ -1018,6 +1018,20 @@ class GodotServer {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'dotnet_build',
+          description: 'Build C# solution/project in a Godot project directory using dotnet build',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+            },
+            required: ['projectPath'],
+          },
+        },
       ],
     }));
 
@@ -1057,6 +1071,8 @@ class GodotServer {
           return await this.handleGetUid(request.params.arguments);
         case 'update_project_uids':
           return await this.handleUpdateProjectUids(request.params.arguments);
+        case 'dotnet_build':
+          return await this.handleDotnetBuild(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -2457,6 +2473,80 @@ class GodotServer {
           'Ensure Godot is installed correctly',
           'Check if the GODOT_PATH environment variable is set correctly',
           'Verify the project path is accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the dotnet_build tool
+   */
+  private async handleDotnetBuild(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        ['Provide a valid path to a Godot project directory']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath)) {
+      return this.createErrorResponse(
+        'Invalid project path',
+        ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      const entries = readdirSync(args.projectPath, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name);
+
+      const slnName = entries.find((name) => name.endsWith('.sln'));
+      const csprojName = entries.find((name) => name.endsWith('.csproj'));
+      const targetName = slnName || csprojName;
+
+      if (!targetName) {
+        return this.createErrorResponse(
+          'No .sln or .csproj found in project root',
+          [
+            'Ensure C# project files exist in the Godot project root',
+            'Generate C# solution/project files from Godot first if needed',
+          ]
+        );
+      }
+
+      const targetPath = join(args.projectPath, targetName);
+      const { stdout, stderr } = await execFileAsync('dotnet', ['build', targetPath], {
+        cwd: args.projectPath,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `dotnet build completed for ${targetName}.\n\nstdout:\n${stdout || '(empty)'}\n\nstderr:\n${stderr || '(empty)'}`,
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to run dotnet build: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure dotnet SDK is installed and available in PATH',
+          'Verify solution/project files are present and valid',
         ]
       );
     }
