@@ -157,10 +157,14 @@ func instantiate_class(name_of_class):
         if debug_mode:
             print("Class not found in ClassDB, trying to get script")
         var script = get_script_by_name(name_of_class)
-        if script is GDScript:
-            if debug_mode:
-                print("Found GDScript, creating instance")
-            result = script.new()
+        if script is Script:
+            if script.can_instantiate():
+                if debug_mode:
+                    print("Found Script, creating instance")
+                result = script.new()
+            else:
+                printerr("Script cannot be instantiated: " + name_of_class)
+                return null
         else:
             printerr("Failed to get script for class: " + name_of_class)
             return null
