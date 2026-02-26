@@ -328,6 +328,7 @@ class GodotServer {
    * Extract the last JSON object/array printed to stdout by the operations runner.
    */
   private parseJsonFromOperationOutput(stdout: string): any | null {
+    // Fast path: try line-wise parsing from the end.
     const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i];
@@ -348,6 +349,30 @@ class GodotServer {
         }
       }
     }
+
+    // Fallback: scan full output for a trailing JSON object/array.
+    const text = stdout.trim();
+    for (let end = text.length - 1; end >= 0; end--) {
+      if (text[end] !== '}' && text[end] !== ']') {
+        continue;
+      }
+      for (let start = end; start >= 0; start--) {
+        const ch = text[start];
+        if (ch !== '{' && ch !== '[') {
+          continue;
+        }
+        const candidate = text.slice(start, end + 1).trim();
+        if (!candidate) {
+          continue;
+        }
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          // continue scanning
+        }
+      }
+    }
+
     return null;
   }
 
