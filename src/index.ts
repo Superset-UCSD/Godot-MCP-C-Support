@@ -101,6 +101,13 @@ class GodotServer {
     'language': 'language',
     'namespace': 'namespace',
     'overwrite': 'overwrite',
+    'wait_frames': 'waitFrames',
+    'dump_layout': 'dumpLayout',
+    'output_dir': 'outputDir',
+    'return_base64': 'returnBase64',
+    'max_base64_bytes': 'maxBase64Bytes',
+    'return_json_text': 'returnJsonText',
+    'max_json_chars': 'maxJsonChars',
   };
 
   /**
