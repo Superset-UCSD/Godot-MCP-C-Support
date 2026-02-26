@@ -547,9 +547,7 @@ class GodotServer {
    */
   private async resolveGodotPath(projectPath?: string): Promise<string> {
     const godotPathOverride = process.env.GODOT_PATH ? normalize(process.env.GODOT_PATH) : null;
-    if (godotPathOverride && await this.isValidGodotPath(godotPathOverride)) {
-      return godotPathOverride;
-    }
+    const strictGodotPathOverride = process.env.GODOT_PATH_STRICT_OVERRIDE === 'true';
 
     const isDotnet = this.isDotnetProject(projectPath);
     const preferDotnetByDefault = !projectPath && (
@@ -557,6 +555,12 @@ class GodotServer {
       process.platform === 'darwin'
     );
     const preferDotnet = isDotnet || preferDotnetByDefault;
+
+    // Keep explicit override behavior unless this is a dotnet-preferred path resolution.
+    if (godotPathOverride && (!preferDotnet || strictGodotPathOverride) && await this.isValidGodotPath(godotPathOverride)) {
+      return godotPathOverride;
+    }
+
     const candidatePaths: string[] = [];
 
     if (preferDotnet) {
@@ -569,8 +573,17 @@ class GodotServer {
           '/Applications/Godot.app/Contents/MacOS/Godot'
         );
       }
+      // If only GODOT_PATH is configured, still consider it after dotnet candidates.
+      if (godotPathOverride) {
+        candidatePaths.push(godotPathOverride);
+      }
     } else if (process.platform === 'darwin') {
+      if (godotPathOverride) {
+        candidatePaths.push(godotPathOverride);
+      }
       candidatePaths.push('/Applications/Godot.app/Contents/MacOS/Godot');
+    } else if (godotPathOverride) {
+      candidatePaths.push(godotPathOverride);
     }
 
     if (this.godotPath) {
