@@ -3441,8 +3441,14 @@ class GodotServer {
    */
   async run() {
     try {
-      const resolvedGodotPath = await this.resolveGodotPath();
-      console.error(`[SERVER] Using Godot at: ${resolvedGodotPath}`);
+      const godotContext = await this.getGodotExecutionContext();
+      console.error(`[SERVER] Using Godot at: ${godotContext.realGodotPath}`);
+      if (godotContext.realGodotPath !== godotContext.resolvedPath) {
+        console.error(`[SERVER] Resolved via: ${godotContext.resolvedPath}`);
+      }
+      if (process.platform === 'darwin') {
+        console.error(`[SERVER] macOS spawn cwd: ${godotContext.cwdUsed}`);
+      }
 
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
