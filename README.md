@@ -104,6 +104,12 @@ On macOS, Godot app bundles contain the executable at:
 
 For C# projects, set `GODOT_DOTNET_PATH` to the Mono/.NET binary path above so `.cs` resources and solution generation/builds work reliably.
 
+Recommended env setup on macOS for C# projects:
+
+```bash
+export GODOT_DOTNET_PATH=/Applications/Godot_mono.app/Contents/MacOS/Godot
+```
+
 ## Installation and Configuration
 
 ### Step 1: Install and Build
@@ -229,6 +235,10 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 
 "Run build_solutions on my project to generate/build C# solution files"
 
+"Run get_godot_exec_info for my project so we can confirm the mono/.NET editor is actually being used"
+
+"Run init_or_build_solutions for my project with a 120 second timeout"
+
 "Export my 3D models as a MeshLibrary for use with GridMap"
 
 "Create a UI scene with buttons and labels for my game's main menu"
@@ -314,6 +324,12 @@ The bundled script accepts operation type and parameters as JSON, allowing for f
 ### C# workflow note
 
 If C# files fail to load (for example, "No loader found for resource: ... .cs") or `*.sln`/`*.csproj` files are missing, run the `build_solutions` tool once for that project. This triggers Godot's solution build pipeline and usually restores C# project artifacts.
+
+For persistent C# initialization issues:
+
+1. Run `get_godot_exec_info` and confirm the reported `realGodotPath` points to the .NET/Mono build.
+2. Run `init_or_build_solutions` (or `build_solutions`) to generate/build project files.
+3. Verify `*.sln`/`*.csproj` in project root and commit them to source control for team consistency.
 
 ## Troubleshooting
 
