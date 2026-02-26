@@ -73,9 +73,14 @@ This direct feedback loop helps AI assistants like Claude understand what works 
 - **Scene Management**:
   - Create new scenes with specified root node types
   - Add nodes to existing scenes with customizable properties
+  - Create and attach scripts to scene nodes (`create_script`, `attach_script`)
   - Load sprites and textures into Sprite2D nodes
   - Export 3D scenes as MeshLibrary resources for GridMap
   - Save scenes with options for creating variants
+- **C# Workflow**:
+  - Default script language is C# (configurable with `GODOT_MCP_DEFAULT_SCRIPT_LANGUAGE` or `DEFAULT_SCRIPT_LANGUAGE`)
+  - C# scripts can be instantiated by script path/global class via `Script.new()` in the bundled runner
+  - Build C# solutions/projects with `dotnet_build`
 - **UID Management** (for Godot 4.4+):
   - Get UID for specific files
   - Update UID references by resaving resources
@@ -85,6 +90,7 @@ This direct feedback loop helps AI assistants like Claude understand what works 
 - [Godot Engine](https://godotengine.org/download) installed on your system
 - Node.js and npm
 - An AI assistant that supports MCP (Cline, Cursor, etc.)
+- For C# scripting: a Mono/.NET-enabled Godot build and .NET SDK installed
 
 ## Installation and Configuration
 
@@ -125,11 +131,14 @@ Add to your Cline MCP settings file (`~/Library/Application Support/Code/User/gl
         "get_project_info",
         "create_scene",
         "add_node",
+        "create_script",
+        "attach_script",
         "load_sprite",
         "export_mesh_library",
         "save_scene",
         "get_uid",
-        "update_project_uids"
+        "update_project_uids",
+        "dotnet_build"
       ]
     }
   }
@@ -173,6 +182,8 @@ You can customize the server behavior with these environment variables:
 
 - `GODOT_PATH`: Path to the Godot executable (overrides automatic detection)
 - `DEBUG`: Set to "true" to enable detailed server-side debug logging
+- `GODOT_MCP_DEFAULT_SCRIPT_LANGUAGE`: Default for `create_script` when language is omitted (`csharp` or `gdscript`, defaults to `csharp`)
+- `DEFAULT_SCRIPT_LANGUAGE`: Legacy-compatible fallback for default script language
 
 ## Example Prompts
 
@@ -195,6 +206,12 @@ Once configured, your AI assistant will automatically run the MCP server when ne
 
 "Add a Sprite2D node to my player scene and load the character texture"
 
+"Create a C# script named MainMenuController inheriting from Control"
+
+"Attach Scripts/MainMenuController.cs to root/MainMenu in Scenes/MainMenu.tscn"
+
+"Build my project's C# solution"
+
 "Export my 3D models as a MeshLibrary for use with GridMap"
 
 "Create a UI scene with buttons and labels for my game's main menu"
@@ -212,6 +229,8 @@ The Godot MCP server uses a bundled GDScript approach for complex operations:
 
 1. **Direct Commands**: Simple operations like launching the editor or getting project info use Godot's built-in CLI commands directly.
 2. **Bundled Operations Script**: Complex operations like creating scenes or adding nodes use a single, comprehensive GDScript file (`godot_operations.gd`) that handles all operations.
+
+For script-driven node creation flows, the bundled runner instantiates script resources through the generic `Script` API, so `.cs` script resources can be instantiated in addition to GDScript.
 
 This architecture provides several benefits:
 
