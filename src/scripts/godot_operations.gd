@@ -61,6 +61,10 @@ func _init():
             create_scene(params)
         "add_node":
             add_node(params)
+        "create_script":
+            create_script(params)
+        "attach_script":
+            attach_script(params)
         "load_sprite":
             load_sprite(params)
         "export_mesh_library":
@@ -157,10 +161,14 @@ func instantiate_class(name_of_class):
         if debug_mode:
             print("Class not found in ClassDB, trying to get script")
         var script = get_script_by_name(name_of_class)
-        if script is GDScript:
-            if debug_mode:
-                print("Found GDScript, creating instance")
-            result = script.new()
+        if script is Script:
+            if script.can_instantiate():
+                if debug_mode:
+                    print("Found Script, creating instance")
+                result = script.new()
+            else:
+                printerr("Script cannot be instantiated: " + name_of_class)
+                return null
         else:
             printerr("Failed to get script for class: " + name_of_class)
             return null
@@ -171,6 +179,228 @@ func instantiate_class(name_of_class):
         print("Successfully instantiated class: " + name_of_class + " of type: " + result.get_class())
     
     return result
+
+func normalize_res_path(path_value):
+    var normalized_path = str(path_value).strip_edges()
+    if normalized_path.is_empty():
+        return normalized_path
+    if normalized_path.begins_with("res://"):
+        return normalized_path
+    return "res://" + normalized_path
+
+func ensure_res_directory_exists(res_file_path):
+    var res_dir = res_file_path.get_base_dir()
+    if res_dir == "res://" or res_dir.is_empty():
+        return OK
+
+    var relative_dir = res_dir.substr(6) # remove "res://"
+    var dir = DirAccess.open("res://")
+    if dir == null:
+        return DirAccess.get_open_error()
+    return dir.make_dir_recursive(relative_dir)
+
+func sanitize_identifier(raw_value, fallback):
+    var source = str(raw_value).strip_edges()
+    if source.is_empty():
+        source = fallback
+
+    var out = ""
+    for i in range(source.length()):
+        var c = source[i]
+        var code = source.unicode_at(i)
+        var is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        var is_digit = code >= 48 and code <= 57
+        var is_underscore = c == "_"
+        if is_alpha or is_digit or is_underscore:
+            out += c
+        else:
+            out += "_"
+
+    if out.is_empty():
+        out = fallback
+
+    var first_code = out.unicode_at(0)
+    var starts_with_digit = first_code >= 48 and first_code <= 57
+    if starts_with_digit:
+        out = "_" + out
+
+    return out
+
+func sanitize_namespace(raw_value, fallback):
+    var source = str(raw_value).strip_edges()
+    if source.is_empty():
+        source = fallback
+
+    var chunks = source.split(".")
+    var sanitized_chunks = []
+    for chunk in chunks:
+        var safe_chunk = sanitize_identifier(chunk, fallback)
+        if not safe_chunk.is_empty():
+            sanitized_chunks.append(safe_chunk)
+
+    if sanitized_chunks.is_empty():
+        return sanitize_identifier(fallback, "GodotMcp")
+
+    return ".".join(sanitized_chunks)
+
+func create_script(params):
+    if not params.has("script_path"):
+        printerr("script_path is required")
+        quit(1)
+
+    var language = "csharp"
+    if params.has("language"):
+        language = str(params.language).to_lower().strip_edges()
+    if language.is_empty():
+        language = "csharp"
+
+    var full_script_path = normalize_res_path(params.script_path)
+    if full_script_path.is_empty():
+        printerr("script_path cannot be empty")
+        quit(1)
+
+    var overwrite = false
+    if params.has("overwrite"):
+        overwrite = bool(params.overwrite)
+
+    if FileAccess.file_exists(full_script_path) and not overwrite:
+        printerr("Script already exists and overwrite is false: " + full_script_path)
+        quit(1)
+
+    var dir_error = ensure_res_directory_exists(full_script_path)
+    if dir_error != OK:
+        printerr("Failed to create script directory for path: " + full_script_path)
+        printerr("Error code: " + str(dir_error))
+        quit(1)
+
+    var file_name = full_script_path.get_file()
+    var inferred_class_name = file_name.get_basename()
+    var class_name = inferred_class_name
+    if params.has("class_name"):
+        class_name = str(params.class_name)
+    class_name = sanitize_identifier(class_name, "GeneratedScript")
+
+    var base_type = "Node"
+    if params.has("base_type"):
+        base_type = str(params.base_type).strip_edges()
+    if base_type.is_empty():
+        base_type = "Node"
+
+    var script_contents = ""
+    if language == "csharp":
+        if not ClassDB.class_exists("CSharpScript"):
+            printerr("C# scripting is not available in this Godot build. Use a Mono/.NET-enabled Godot build.")
+            quit(1)
+
+        var namespace_value = ""
+        if params.has("namespace"):
+            namespace_value = str(params.namespace)
+        if namespace_value.is_empty():
+            namespace_value = str(ProjectSettings.get_setting("application/config/name", "GodotMcp"))
+        namespace_value = sanitize_namespace(namespace_value, "GodotMcp")
+
+        var attribute_lines = ""
+        if params.has("tool") and bool(params.tool):
+            attribute_lines += "    [Tool]\n"
+        if params.has("global_class") and bool(params.global_class):
+            attribute_lines += "    [GlobalClass]\n"
+
+        script_contents = "using Godot;\n"
+        script_contents += "using System;\n\n"
+        script_contents += "namespace " + namespace_value + "\n"
+        script_contents += "{\n"
+        script_contents += attribute_lines
+        script_contents += "    public partial class " + class_name + " : " + base_type + "\n"
+        script_contents += "    {\n"
+        script_contents += "        public override void _Ready()\n"
+        script_contents += "        {\n"
+        script_contents += "        }\n"
+        script_contents += "    }\n"
+        script_contents += "}\n"
+    elif language == "gdscript":
+        script_contents = "extends " + base_type + "\n"
+        script_contents += "class_name " + class_name + "\n\n"
+        if params.has("tool") and bool(params.tool):
+            script_contents = "@tool\n" + script_contents
+        script_contents += "func _ready() -> void:\n"
+        script_contents += "    pass\n"
+    else:
+        printerr("Unsupported script language: " + language + ". Use 'csharp' or 'gdscript'.")
+        quit(1)
+
+    var script_file = FileAccess.open(full_script_path, FileAccess.WRITE)
+    if script_file == null:
+        printerr("Failed to open script for writing: " + full_script_path)
+        printerr("FileAccess error: " + str(FileAccess.get_open_error()))
+        quit(1)
+
+    script_file.store_string(script_contents)
+    script_file.close()
+    print("Script created successfully at: " + full_script_path)
+
+func attach_script(params):
+    if not params.has("scene_path") or not params.has("node_path") or not params.has("script_path"):
+        printerr("scene_path, node_path, and script_path are required")
+        quit(1)
+
+    var full_scene_path = normalize_res_path(params.scene_path)
+    var full_script_path = normalize_res_path(params.script_path)
+    var node_path = str(params.node_path).strip_edges()
+    var overwrite = true
+    if params.has("overwrite"):
+        overwrite = bool(params.overwrite)
+
+    if not FileAccess.file_exists(full_scene_path):
+        printerr("Scene file does not exist at: " + full_scene_path)
+        quit(1)
+    if not FileAccess.file_exists(full_script_path):
+        printerr("Script file does not exist at: " + full_script_path)
+        quit(1)
+
+    var scene = load(full_scene_path)
+    if scene == null:
+        printerr("Failed to load scene: " + full_scene_path)
+        quit(1)
+
+    var scene_root = scene.instantiate()
+    if scene_root == null:
+        printerr("Failed to instantiate scene: " + full_scene_path)
+        quit(1)
+
+    var target = scene_root
+    if node_path != "root":
+        var stripped_path = node_path
+        if stripped_path.begins_with("root/"):
+            stripped_path = stripped_path.substr(5)
+        target = scene_root.get_node(stripped_path)
+
+    if target == null:
+        printerr("Target node not found: " + node_path)
+        quit(1)
+
+    var script = load(full_script_path) as Script
+    if script == null:
+        printerr("Failed to load script resource: " + full_script_path)
+        quit(1)
+
+    if not overwrite and target.get_script() != null:
+        printerr("Target node already has a script and overwrite is false")
+        quit(1)
+
+    target.set_script(script)
+
+    var packed_scene = PackedScene.new()
+    var pack_error = packed_scene.pack(scene_root)
+    if pack_error != OK:
+        printerr("Failed to pack scene: " + str(pack_error))
+        quit(1)
+
+    var save_error = ResourceSaver.save(packed_scene, full_scene_path)
+    if save_error != OK:
+        printerr("Failed to save scene after attaching script: " + str(save_error))
+        quit(1)
+
+    print("Script attached successfully: " + full_script_path + " -> " + node_path)
 
 # Create a new scene with a specified root node type
 func create_scene(params):
