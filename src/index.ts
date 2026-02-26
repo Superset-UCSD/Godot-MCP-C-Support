@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize, resolve, relative, isAbsolute } from 'path';
-import { existsSync, readdirSync, mkdirSync, readFileSync, statSync, Dirent } from 'fs';
+import { existsSync, readdirSync, mkdirSync, readFileSync, statSync, realpathSync, Dirent } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -109,6 +109,7 @@ class GodotServer {
     'max_base64_bytes': 'maxBase64Bytes',
     'return_json_text': 'returnJsonText',
     'max_json_chars': 'maxJsonChars',
+    'timeout_seconds': 'timeoutSeconds',
   };
 
   /**
@@ -587,6 +588,43 @@ class GodotServer {
   }
 
   /**
+   * Get execution context (resolved path + real executable path + cwd).
+   */
+  private async getGodotExecutionContext(projectPath?: string): Promise<{
+    resolvedPath: string;
+    realGodotPath: string;
+    cwdUsed: string;
+  }> {
+    const resolvedPath = await this.resolveGodotPath(projectPath);
+    let realGodotPath = resolvedPath;
+
+    try {
+      if (isAbsolute(resolvedPath)) {
+        realGodotPath = realpathSync(resolvedPath);
+      } else {
+        const lookupCommand = process.platform === 'win32' ? 'where' : 'which';
+        const { stdout } = await execFileAsync(lookupCommand, [resolvedPath]);
+        const firstPath = (stdout ?? '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find(Boolean);
+        if (firstPath) {
+          realGodotPath = realpathSync(firstPath);
+        }
+      }
+    } catch {
+      try {
+        realGodotPath = realpathSync(resolvedPath);
+      } catch {
+        realGodotPath = resolvedPath;
+      }
+    }
+
+    const cwdUsed = process.platform === 'darwin' ? dirname(realGodotPath) : process.cwd();
+    return { resolvedPath, realGodotPath, cwdUsed };
+  }
+
+  /**
    * Set a custom Godot path
    * @param customPath Path to the Godot executable
    * @returns True if the path is valid and was set, false otherwise
@@ -706,7 +744,7 @@ class GodotServer {
     operation: string,
     params: OperationParams,
     projectPath: string
-  ): Promise<{ stdout: string; stderr: string }> {
+  ): Promise<{ stdout: string; stderr: string; godotPathUsed: string; cwdUsed: string }> {
     this.logDebug(`Executing operation: ${operation} in project: ${projectPath}`);
     this.logDebug(`Original operation params: ${JSON.stringify(params)}`);
 
@@ -715,7 +753,7 @@ class GodotServer {
     this.logDebug(`Converted snake_case params: ${JSON.stringify(snakeCaseParams)}`);
 
 
-    const godotPath = await this.resolveGodotPath(projectPath);
+    const godotContext = await this.getGodotExecutionContext(projectPath);
 
     try {
       // Serialize the snake_case parameters to a valid JSON string
@@ -738,11 +776,18 @@ class GodotServer {
         args.push('--debug-godot');
       }
 
-      this.logDebug(`Executing: ${godotPath} ${args.join(' ')}`);
+      this.logDebug(`Executing: ${godotContext.realGodotPath} ${args.join(' ')}`);
 
-      const { stdout, stderr } = await execFileAsync(godotPath, args);
+      const { stdout, stderr } = await execFileAsync(godotContext.realGodotPath, args, {
+        cwd: godotContext.cwdUsed,
+      });
 
-      return { stdout: stdout ?? '', stderr: stderr ?? '' };
+      return {
+        stdout: stdout ?? '',
+        stderr: stderr ?? '',
+        godotPathUsed: godotContext.realGodotPath,
+        cwdUsed: godotContext.cwdUsed,
+      };
     } catch (error: unknown) {
       // If execFileAsync throws, it still contains stdout/stderr
       if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
@@ -750,6 +795,8 @@ class GodotServer {
         return {
           stdout: execError.stdout ?? '',
           stderr: execError.stderr ?? '',
+          godotPathUsed: godotContext.realGodotPath,
+          cwdUsed: godotContext.cwdUsed,
         };
       }
 
@@ -938,6 +985,20 @@ class GodotServer {
           inputSchema: {
             type: 'object',
             properties: {},
+            required: [],
+          },
+        },
+        {
+          name: 'get_godot_exec_info',
+          description: 'Get resolved/real Godot executable info and version diagnostics',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Optional: Path to the Godot project directory',
+              },
+            },
             required: [],
           },
         },
@@ -1288,6 +1349,32 @@ class GodotServer {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'init_or_build_solutions',
+          description: 'Initialize/build C# solutions with timeout and diagnostics',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: {
+                type: 'string',
+                description: 'Path to the Godot project directory',
+              },
+              headless: {
+                type: 'boolean',
+                description: 'Run in headless mode (default true)',
+              },
+              timeoutSeconds: {
+                type: 'integer',
+                description: 'Timeout in seconds (default 120)',
+              },
+              quit: {
+                type: 'boolean',
+                description: 'Quit after build (default true)',
+              },
+            },
+            required: ['projectPath'],
+          },
+        },
       ],
     }));
 
@@ -1305,6 +1392,8 @@ class GodotServer {
           return await this.handleStopProject();
         case 'get_godot_version':
           return await this.handleGetGodotVersion();
+        case 'get_godot_exec_info':
+          return await this.handleGetGodotExecInfo(request.params.arguments);
         case 'list_projects':
           return await this.handleListProjects(request.params.arguments);
         case 'get_project_info':
@@ -1335,6 +1424,8 @@ class GodotServer {
           return await this.handleDumpUiLayout(request.params.arguments);
         case 'build_solutions':
           return await this.handleBuildSolutions(request.params.arguments);
+        case 'init_or_build_solutions':
+          return await this.handleInitOrBuildSolutions(request.params.arguments);
         default:
           throw new McpError(
             ErrorCode.MethodNotFound,
@@ -1367,7 +1458,7 @@ class GodotServer {
     }
 
     try {
-      const godotPath = await this.resolveGodotPath(args.projectPath);
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
 
       // Check if the project directory exists and contains a project.godot file
       const projectFile = join(args.projectPath, 'project.godot');
@@ -1382,7 +1473,8 @@ class GodotServer {
       }
 
       this.logDebug(`Launching Godot editor for project: ${args.projectPath}`);
-      const process = spawn(godotPath, ['-e', '--path', args.projectPath], {
+      const process = spawn(godotContext.realGodotPath, ['-e', '--path', args.projectPath], {
+        cwd: godotContext.cwdUsed,
         stdio: 'pipe',
       });
 
@@ -1394,7 +1486,16 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot editor launched successfully for project at ${args.projectPath}.`,
+            text: JSON.stringify(
+              {
+                ok: true,
+                message: `Godot editor launched successfully for project at ${args.projectPath}.`,
+                godotPathUsed: godotContext.realGodotPath,
+                cwdUsed: godotContext.cwdUsed,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -1459,8 +1560,11 @@ class GodotServer {
       }
 
       this.logDebug(`Running Godot project: ${args.projectPath}`);
-      const godotPath = await this.resolveGodotPath(args.projectPath);
-      const process = spawn(godotPath, cmdArgs, { stdio: 'pipe' });
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
+      const process = spawn(godotContext.realGodotPath, cmdArgs, {
+        cwd: godotContext.cwdUsed,
+        stdio: 'pipe',
+      });
       const output: string[] = [];
       const errors: string[] = [];
 
@@ -1500,7 +1604,16 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot project started in debug mode. Use get_debug_output to see output.`,
+            text: JSON.stringify(
+              {
+                ok: true,
+                message: 'Godot project started in debug mode. Use get_debug_output to see output.',
+                godotPathUsed: godotContext.realGodotPath,
+                cwdUsed: godotContext.cwdUsed,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -1592,8 +1705,10 @@ class GodotServer {
   private async handleGetGodotVersion() {
     try {
       this.logDebug('Getting Godot version');
-      const godotPath = await this.resolveGodotPath();
-      const { stdout } = await execFileAsync(godotPath, ['--version']);
+      const godotContext = await this.getGodotExecutionContext();
+      const { stdout } = await execFileAsync(godotContext.realGodotPath, ['--version'], {
+        cwd: godotContext.cwdUsed,
+      });
       return {
         content: [
           {
@@ -1609,6 +1724,72 @@ class GodotServer {
         [
           'Ensure Godot is installed correctly',
           'Check if the GODOT_PATH environment variable is set correctly',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the get_godot_exec_info tool
+   */
+  private async handleGetGodotExecInfo(args: any) {
+    args = this.normalizeParameters(args || {});
+
+    try {
+      const projectPath = args.projectPath;
+      if (projectPath && !this.validatePath(projectPath)) {
+        return this.createErrorResponse(
+          'Invalid project path',
+          ['Provide a valid path without ".." or other potentially unsafe characters']
+        );
+      }
+
+      if (projectPath) {
+        const projectFile = join(projectPath, 'project.godot');
+        if (!existsSync(projectFile)) {
+          return this.createErrorResponse(
+            `Not a valid Godot project: ${projectPath}`,
+            [
+              'Ensure the path points to a directory containing a project.godot file',
+              'Use list_projects to find valid Godot projects',
+            ]
+          );
+        }
+      }
+
+      const godotContext = await this.getGodotExecutionContext(projectPath);
+      const { stdout } = await execFileAsync(godotContext.realGodotPath, ['--version'], {
+        cwd: godotContext.cwdUsed,
+      });
+      const versionText = (stdout ?? '').trim();
+      const versionLower = versionText.toLowerCase();
+      const isDotnetHint = versionLower.includes('mono') || versionLower.includes('.net') || versionLower.includes('c#');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                resolvedPath: godotContext.resolvedPath,
+                realGodotPath: godotContext.realGodotPath,
+                versionText,
+                isDotnetHint,
+                platform: process.platform,
+                cwdUsedForSpawn: godotContext.cwdUsed,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to get Godot exec info: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Set GODOT_PATH or GODOT_DOTNET_PATH to valid executable paths',
         ]
       );
     }
@@ -1767,8 +1948,11 @@ class GodotServer {
   
       // Get Godot version
       const execOptions = { timeout: 10000 }; // 10 second timeout
-      const godotPath = await this.resolveGodotPath(args.projectPath);
-      const { stdout } = await execFileAsync(godotPath, ['--version'], execOptions);
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
+      const { stdout } = await execFileAsync(godotContext.realGodotPath, ['--version'], {
+        ...execOptions,
+        cwd: godotContext.cwdUsed,
+      });
   
       // Get project structure using the recursive method
       const projectStructure = await this.getProjectStructureAsync(args.projectPath);
@@ -1858,7 +2042,7 @@ class GodotServer {
       };
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('create_scene', params, args.projectPath);
+      const { stdout, stderr, godotPathUsed, cwdUsed } = await this.executeOperation('create_scene', params, args.projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1875,7 +2059,17 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Scene created successfully at: ${args.scenePath}\n\nOutput: ${stdout}`,
+            text: JSON.stringify(
+              {
+                ok: true,
+                message: `Scene created successfully at: ${args.scenePath}`,
+                output: stdout,
+                godotPathUsed,
+                cwdUsed,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -1954,7 +2148,7 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('add_node', params, args.projectPath);
+      const { stdout, stderr, godotPathUsed, cwdUsed } = await this.executeOperation('add_node', params, args.projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -1971,7 +2165,17 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Node '${args.nodeName}' of type '${args.nodeType}' added successfully to '${args.scenePath}'.\n\nOutput: ${stdout}`,
+            text: JSON.stringify(
+              {
+                ok: true,
+                message: `Node '${args.nodeName}' of type '${args.nodeType}' added successfully to '${args.scenePath}'.`,
+                output: stdout,
+                godotPathUsed,
+                cwdUsed,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -2461,7 +2665,7 @@ class GodotServer {
       }
 
       // Execute the operation
-      const { stdout, stderr } = await this.executeOperation('save_scene', params, args.projectPath);
+      const { stdout, stderr, godotPathUsed, cwdUsed } = await this.executeOperation('save_scene', params, args.projectPath);
 
       if (stderr && stderr.includes('Failed to')) {
         return this.createErrorResponse(
@@ -2479,7 +2683,17 @@ class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Scene saved successfully to: ${savePath}\n\nOutput: ${stdout}`,
+            text: JSON.stringify(
+              {
+                ok: true,
+                message: `Scene saved successfully to: ${savePath}`,
+                output: stdout,
+                godotPathUsed,
+                cwdUsed,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -2540,8 +2754,10 @@ class GodotServer {
       }
 
       // Get Godot version to check if UIDs are supported
-      const godotPath = await this.resolveGodotPath(args.projectPath);
-      const { stdout: versionOutput } = await execFileAsync(godotPath, ['--version']);
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
+      const { stdout: versionOutput } = await execFileAsync(godotContext.realGodotPath, ['--version'], {
+        cwd: godotContext.cwdUsed,
+      });
       const version = versionOutput.trim();
 
       if (!this.isGodot44OrLater(version)) {
@@ -2628,8 +2844,10 @@ class GodotServer {
       }
 
       // Get Godot version to check if UIDs are supported
-      const godotPath = await this.resolveGodotPath(args.projectPath);
-      const { stdout: versionOutput } = await execFileAsync(godotPath, ['--version']);
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
+      const { stdout: versionOutput } = await execFileAsync(godotContext.realGodotPath, ['--version'], {
+        cwd: godotContext.cwdUsed,
+      });
       const version = versionOutput.trim();
 
       if (!this.isGodot44OrLater(version)) {
@@ -3025,7 +3243,7 @@ class GodotServer {
         );
       }
 
-      const godotPath = await this.resolveGodotPath(args.projectPath);
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
       const headless = args.headless !== false;
       const quit = args.quit !== false;
 
@@ -3044,7 +3262,9 @@ class GodotServer {
       let stderr = '';
 
       try {
-        const result = await execFileAsync(godotPath, cmdArgs);
+        const result = await execFileAsync(godotContext.realGodotPath, cmdArgs, {
+          cwd: godotContext.cwdUsed,
+        });
         stdout = result.stdout ?? '';
         stderr = result.stderr ?? '';
       } catch (error: any) {
@@ -3064,7 +3284,8 @@ class GodotServer {
                 exitCode,
                 stdout,
                 stderr,
-                godotPathUsed: godotPath,
+                godotPathUsed: godotContext.realGodotPath,
+                cwdUsed: godotContext.cwdUsed,
               },
               null,
               2
@@ -3075,6 +3296,137 @@ class GodotServer {
     } catch (error: any) {
       return this.createErrorResponse(
         `Failed to build solutions: ${error?.message || 'Unknown error'}`,
+        [
+          'Ensure Godot is installed correctly',
+          'Set GODOT_DOTNET_PATH to a Mono/.NET-enabled Godot binary',
+          'Verify the project path is accessible',
+        ]
+      );
+    }
+  }
+
+  /**
+   * Handle the init_or_build_solutions tool
+   */
+  private async handleInitOrBuildSolutions(args: any) {
+    args = this.normalizeParameters(args);
+
+    if (!args.projectPath) {
+      return this.createErrorResponse(
+        'Project path is required',
+        ['Provide a valid path to a Godot project directory']
+      );
+    }
+
+    if (!this.validatePath(args.projectPath)) {
+      return this.createErrorResponse(
+        'Invalid project path',
+        ['Provide a valid path without ".." or other potentially unsafe characters']
+      );
+    }
+
+    try {
+      const projectFile = join(args.projectPath, 'project.godot');
+      if (!existsSync(projectFile)) {
+        return this.createErrorResponse(
+          `Not a valid Godot project: ${args.projectPath}`,
+          [
+            'Ensure the path points to a directory containing a project.godot file',
+            'Use list_projects to find valid Godot projects',
+          ]
+        );
+      }
+
+      const godotContext = await this.getGodotExecutionContext(args.projectPath);
+      const headless = args.headless !== false;
+      const quit = args.quit !== false;
+      const timeoutSeconds = Number(args.timeoutSeconds ?? 120);
+      const timeoutMs = Math.max(1, timeoutSeconds) * 1000;
+
+      const cmdArgs: string[] = [];
+      if (headless) {
+        cmdArgs.push('--headless');
+      }
+      cmdArgs.push('--path', args.projectPath, '--build-solutions');
+      if (quit) {
+        cmdArgs.push('--quit');
+      }
+
+      let stdout = '';
+      let stderr = '';
+      let exitCode: number | null = null;
+      let didTimeout = false;
+
+      await new Promise<void>((resolvePromise) => {
+        const proc = spawn(godotContext.realGodotPath, cmdArgs, {
+          cwd: godotContext.cwdUsed,
+          stdio: 'pipe',
+        });
+
+        const timeoutHandle = setTimeout(() => {
+          didTimeout = true;
+          proc.kill('SIGTERM');
+          setTimeout(() => {
+            if (!proc.killed) {
+              proc.kill('SIGKILL');
+            }
+          }, 2000);
+        }, timeoutMs);
+
+        proc.stdout?.on('data', (data: Buffer) => {
+          stdout += data.toString();
+        });
+        proc.stderr?.on('data', (data: Buffer) => {
+          stderr += data.toString();
+        });
+        proc.on('exit', (code) => {
+          clearTimeout(timeoutHandle);
+          exitCode = code;
+          resolvePromise();
+        });
+        proc.on('error', (err) => {
+          clearTimeout(timeoutHandle);
+          stderr += `\n${err.message}`;
+          exitCode = 1;
+          resolvePromise();
+        });
+      });
+
+      const rootEntries = readdirSync(args.projectPath, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name);
+      const slnFiles = rootEntries.filter((name) => name.endsWith('.sln'));
+      const csprojFiles = rootEntries.filter((name) => name.endsWith('.csproj'));
+      const foundSlnCsprojAfter = {
+        found: slnFiles.length > 0 || csprojFiles.length > 0,
+        slnFiles,
+        csprojFiles,
+      };
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: !didTimeout && exitCode === 0,
+                exitCode,
+                stdout,
+                stderr,
+                godotPathUsed: godotContext.realGodotPath,
+                cwdUsed: godotContext.cwdUsed,
+                didTimeout,
+                foundSlnCsprojAfter,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: any) {
+      return this.createErrorResponse(
+        `Failed to initialize/build solutions: ${error?.message || 'Unknown error'}`,
         [
           'Ensure Godot is installed correctly',
           'Set GODOT_DOTNET_PATH to a Mono/.NET-enabled Godot binary',
